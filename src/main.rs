@@ -1,3 +1,5 @@
+#![warn(clippy::all, clippy::pedantic)]
+
 mod options;
 
 use std::fs::{self, File};
@@ -11,7 +13,7 @@ use anyhow::{anyhow, Result};
 use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use regex::{Captures, Regex};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use structopt::StructOpt;
 
 use crate::options::Options;
@@ -21,27 +23,16 @@ fn main() -> Result<()> {
 
     let options = Options::from_args();
     let results = run(&options.input)?;
-    debug!("{} files read", results.len());
-    for result in results {
-        if result.is_ok() {
-            write_file(&result?, &options);
-        } else {
-            warn!("{:?}", result.err());
-        }
-    }
-    Ok(())
-}
+    debug!("{} files read", &results.len());
 
-fn load_file(path: &PathBuf) -> Result<FileData> {
-    let file = File::open(path)?;
-    let reader: BufReader<File> = BufReader::new(file);
-    Ok(FileData {
-        value: serde_json::from_reader(reader)?,
-        filename: path
-            .file_name()
-            .expect("Expect file should have a filename")
-            .to_owned(),
-    })
+    let (oks, errors): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
+    let success_results: Vec<_> = oks.into_iter().map(Result::unwrap).collect();
+    let failed_results: Vec<_> = errors.into_iter().map(Result::unwrap_err).collect();
+    for err in failed_results {
+        warn!("{:?}", err);
+    }
+    write_files(success_results, &options);
+    Ok(())
 }
 
 fn run(path: &Path) -> Result<Vec<Result<FileData>>> {
@@ -64,9 +55,49 @@ fn run(path: &Path) -> Result<Vec<Result<FileData>>> {
     Ok(results)
 }
 
+#[derive(Debug)]
 struct FileData {
     value: Value,
     filename: OsString,
+}
+
+fn load_file(path: &PathBuf) -> Result<FileData> {
+    let file = File::open(path)?;
+    let reader: BufReader<File> = BufReader::new(file);
+    Ok(FileData {
+        value: serde_json::from_reader(reader)?,
+        filename: path
+            .file_name()
+            .expect("Expect file should have a filename")
+            .to_owned(),
+    })
+}
+
+fn write_files(files: Vec<FileData>, options: &Options) {
+    let key = &options.key;
+    let mut values: Vec<Value> = Vec::new();
+    for data_wrapper in files {
+        let data = data_wrapper.value[key].clone();
+        if data.as_null().is_some() {
+            info!("Skipping {}", &data_wrapper.filename.to_string_lossy());
+            return;
+        }
+
+        let array = data.as_array().expect("Expected array").to_owned();
+        values.extend(array.into_iter().map(|v| v.to_owned()));
+    }
+    let mut map = Map::new();
+    map.insert(key.to_owned(), Value::Array(values));
+    let values = Value::from(map).to_string();
+    let data = run_regex(values);
+
+    let mut path = Path::new(&options.output).to_path_buf();
+    path.push(format!("{0}.json", key));
+    info!("Writing file to {}", &path.to_string_lossy());
+    fs::write(&path, data).expect(&format!(
+        "Unable to write file to {}",
+        &path.to_string_lossy()
+    ));
 }
 
 /// Take
@@ -95,19 +126,19 @@ fn run_regex(data: String) -> String {
         // e.g. {@spell name} {@spell name|source}
         // Item, creature, spell, skill, sense, background, race, optional feature, condition, disease, reward, trap, hazard, feat, psionic, object, boon, cult, variant, vehicle, table, deity, action, language
         static ref UNLABELLED_GENERIC_LINK: Regex =
-            Regex::new(r#"\{@(?:(?:spell)|(?:item)|(?:creature)|(?:background)|(?:race)|(?:optfeature)|(?:condition)|(?:disease)|(?:reward)|(?:alert)|(?:psionic)|(?:object)|(?:boon)|(?:hazard)|(?:variantrule)|(?:vehicle)|(?:table)|(?:action)|(?:sense)|(?:skill)) ([\w\s'()\-+,]+)(?:\|[\w\s'()\-+,]*)?\}"#).unwrap();
+            Regex::new(r#"\{@(?:(?:spell)|(?:item)|(?:creature)|(?:background)|(?:race)|(?:optfeature)|(?:condition)|(?:disease)|(?:reward)|(?:alert)|(?:psionic)|(?:object)|(?:boon)|(?:hazard)|(?:variantrule)|(?:vehicle)|(?:table)|(?:action)|(?:sense)|(?:skill)) ([\w\s'()\-+,/:]+)(?:\|[\w\s'()\-+,/:]*)?\}"#).unwrap();
 
         // e.g. {@spell name|source|the actual text to display}
         // Item, creature, spell, skill, sense, background, race, optional feature, condition, disease, reward, trap, hazard, feat, psionic, object, boon, cult, variant, vehicle, table, deity, action, language
         static ref LABELLED_GENERIC_LINK: Regex =
-            Regex::new(r#"\{@(?:(?:spell)|(?:item)|(?:creature)|(?:background)|(?:race)|(?:optfeature)|(?:condition)|(?:disease)|(?:reward)|(?:alert)|(?:psionic)|(?:object)|(?:boon)|(?:hazard)|(?:variantrule)|(?:vehicle)|(?:table)|(?:action)) (?:[\w\s'()\-+,]*\|){2}([\w\s'()\-+,]+)\}"#).unwrap();
-        static ref FILTER: Regex = Regex::new(r#"\{@filter ([\w\s'()\-/+]+)(?:\|[\w\s'!=;()&\[\]/+]+)*\}"#).unwrap();
+            Regex::new(r#"\{@(?:(?:spell)|(?:item)|(?:creature)|(?:background)|(?:race)|(?:optfeature)|(?:condition)|(?:disease)|(?:reward)|(?:alert)|(?:psionic)|(?:object)|(?:boon)|(?:hazard)|(?:variantrule)|(?:vehicle)|(?:table)|(?:action)) (?:[\w\s'()\-+,/:]*\|){2}([\w\s'()\-+,/:]+)\}"#).unwrap();
+        static ref FILTER: Regex = Regex::new(r#"\{@filter ([\w\s'()\-/+/:]+)(?:\|[\w\s'!=;()&\[\]/+]+)*\}"#).unwrap();
 
         // TODO: deity
         // TODO: class
         // TODO: check if we can handle book_or_adventure separaely
-        static ref book_or_adventure: Regex =
-            Regex::new(r#"\{@(?:(?:book)|(?:adventure)) ([\w\s'()\-+]+)(?:\|[\w\s'()\-+\d]+)*\}"#).unwrap();
+        static ref BOOK_OR_ADVENTURE: Regex =
+            Regex::new(r#"\{@(?:(?:book)|(?:adventure)) ([\w\s'()\-+/:']+)(?:\|[\w\s'()\-+\d/:]+)*\}"#).unwrap();
 
         static ref MELEE: Regex = Regex::new(r#"\{@atk m\}"#).unwrap(); // _Melee Attack_
         static ref MELEE_WEAPON: Regex = Regex::new(r#"\{@atk mw\}"#).unwrap(); // _Melee Weapon Attack_
@@ -142,6 +173,7 @@ fn run_regex(data: String) -> String {
     let data = UNLABELLED_GENERIC_LINK.replace_all(&data, "_${1}_");
     let data = LABELLED_GENERIC_LINK.replace_all(&data, "_${1}_");
     let data = FILTER.replace_all(&data, "${1}");
+    let data = BOOK_OR_ADVENTURE.replace_all(&data, "${1}");
 
     let data = MELEE.replace_all(&data, "Melee Attack");
     let data = MELEE_WEAPON.replace_all(&data, "Melee Weapon Attack");
@@ -151,21 +183,4 @@ fn run_regex(data: String) -> String {
     let data = RANGED_WEAPON.replace_all(&data, "Ranged Weapon Attack");
     let data = MELEE_SPELL_OR_RANGED_SPELL.replace_all(&data, "Melee or Ranged Spell Attack");
     data.into_owned()
-}
-
-fn write_file(data_wrapper: &FileData, options: &Options) {
-    let data = &data_wrapper.value[&options.key];
-    if data.as_null().is_some() {
-        info!("Skipping {}", &data_wrapper.filename.to_string_lossy());
-        return;
-    }
-    let data = data.to_string();
-    let data = run_regex(data);
-    let mut path = Path::new(&options.output).to_path_buf();
-    path.push(&data_wrapper.filename);
-    info!("Writing file to {}", &path.to_string_lossy());
-    fs::write(&path, data).expect(&format!(
-        "Unable to write file to {}",
-        &path.to_string_lossy()
-    ));
 }
