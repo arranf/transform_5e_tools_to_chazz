@@ -80,12 +80,12 @@ fn write_files(files: Vec<FileData>, options: &Options) {
         let data = data_wrapper.value[key].clone();
         if data.as_null().is_some() {
             info!("Skipping {}", &data_wrapper.filename.to_string_lossy());
-            return;
+        } else {
+            let array = data.as_array().expect("Expected array").to_owned();
+            values.extend(array.into_iter().map(|v| v.to_owned()));
         }
-
-        let array = data.as_array().expect("Expected array").to_owned();
-        values.extend(array.into_iter().map(|v| v.to_owned()));
     }
+
     let mut map = Map::new();
     map.insert(key.to_owned(), Value::Array(values));
     let values = Value::from(map).to_string();

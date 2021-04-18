@@ -4,8 +4,8 @@ use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
 #[structopt(
-    name = "ssh-me-in",
-    about = "A command line tool for adding your IP as a SSH rule to EC2 AWS security groups."
+    name = "transform-5e-tools-to-chazz",
+    about = "A command line tool for transforming data from 5e.tools to a format Chazz understands."
 )]
 pub struct Options {
     #[structopt(flatten)]
